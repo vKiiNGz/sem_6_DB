@@ -1,0 +1,279 @@
+-- task1
+CREATE TABLE MyTable(id number, val number);
+DROP TABLE MyTable;
+
+-- task2
+
+BEGIN
+    FOR i in 1..10
+    LOOP
+        INSERT INTO MyTable VALUES(i, round(dbms_random.value(1,100), 0));
+    END LOOP;
+END;
+
+SELECT * from MyTable;
+
+TRUNCATE TABLE MyTable;
+
+-- task3
+
+CREATE OR REPLACE FUNCTION check_honest
+RETURN VARCHAR2
+IS
+    result varchar2(5);
+    number_of_honest number := 0;
+    number_of_not_honest number := 0;
+
+    CURSOR honest
+    IS
+    SELECT COUNT(*) from MyTable
+        WHERE MOD(val, 2) = 0;
+
+    CURSOR not_honest
+    IS
+    SELECT COUNT(*) from MyTable
+        WHERE MOD(val, 2) = 1;
+BEGIN
+
+    OPEN honest;
+    FETCH honest INTO number_of_honest;
+
+    OPEN not_honest;
+    FETCH not_honest INTO number_of_not_honest;
+
+    IF not_honest%NOTFOUND THEN
+        result := 'FALSE';
+    end if;
+
+    IF not_honest%NOTFOUND THEN
+        result := 'TRUE';
+    end if;
+
+    IF number_of_honest = number_of_not_honest THEN
+        result := 'EQUAL';
+    end if;
+
+    IF number_of_honest > number_of_not_honest THEN
+        result := 'TRUE';
+    end if;
+
+
+    IF number_of_honest < number_of_not_honest THEN
+        result := 'FALSE';
+    end if;
+
+    DBMS_OUTPUT.PUT_LINE(result);
+
+    CLOSE honest;
+    CLOSE not_honest;
+
+    RETURN result;
+
+END check_honest;
+
+--------------------------------------
+
+DECLARE
+    result varchar2(5);
+BEGIN
+    DBMS_OUTPUT.enable;
+    result := check_honest();
+    DBMS_OUTPUT.PUT_LINE('Result: ' || result);
+end;
+
+TRUNCATE TABLE MyTable;
+
+DECLARE
+    result varchar2(5);
+BEGIN
+    DBMS_OUTPUT.enable;
+    INSERT INTO MyTable VALUES(1, 1);
+    result := check_honest();
+    DBMS_OUTPUT.PUT_LINE('First: ' || result);
+    INSERT INTO MyTable VALUES(2, 2);
+    result := check_honest();
+    DBMS_OUTPUT.PUT_LINE('Second: ' || result);
+    INSERT INTO MyTable VALUES(3, 2);
+    result := check_honest();
+    DBMS_OUTPUT.PUT_LINE('Third: ' || result);
+end;
+--------------------------------------
+
+---in class
+CREATE OR REPLACE FUNCTION mystring2(id IN NUMBER)
+RETURN VARCHAR2
+IS
+myval numeric := -1;
+result varchar2(100);
+CURSOR mycursor(myid IN NUMERIC)
+IS
+SELECT MyTable.val from MyTable
+        WHERE mystring2.id = MyTable.id;
+BEGIN
+    open mycursor(id);
+    fetch mycursor into myval;
+    DBMS_OUTPUT.PUT_LINE(myval);
+    IF mycursor%NOTFOUND then
+        result := 'No posts with this id';
+    else
+        result := 'INSERT INTO MyTable VALUES (' || id || ', '
+                  || myval ||')';
+    end if;
+
+    close mycursor;
+
+    DBMS_OUTPUT.enable;
+    DBMS_OUTPUT.PUT_LINE(result);
+    RETURN result;
+end;
+
+DECLARE
+    result varchar2(100);
+BEGIN
+    DBMS_OUTPUT.enable;
+    result := mystring2(3);
+    DBMS_OUTPUT.PUT_LINE('Result: ' || result);
+end;
+---
+
+-- task4
+CREATE OR REPLACE FUNCTION mystring(id IN NUMBER)
+RETURN VARCHAR2
+IS
+result varchar2(100);
+BEGIN
+    result := 'INSERT INTO MyTable VALUES (' || id || ', '
+                  || round(dbms_random.value(1,100), 0) ||')';
+    DBMS_OUTPUT.PUT_LINE(result);
+    RETURN result;
+end;
+---
+DECLARE
+    result varchar2(100);
+BEGIN
+    DBMS_OUTPUT.enable;
+    result := mystring(10);
+    DBMS_OUTPUT.PUT_LINE('Generated string: ' || result);
+end;
+---
+
+--task5
+CREATE OR REPLACE PROCEDURE MYINSERT(id IN NUMBER)
+IS
+BEGIN
+    INSERT INTO MyTable VALUES(id, round(dbms_random.value(1,100), 0));
+end;
+
+TRUNCATE TABLE MyTable;
+DECLARE
+    myid NUMBER := 0;
+    result   MyTable.val%TYPE;
+    CURSOR outcurs(id IN NUMBER)
+    IS
+        SELECT val FROM MyTable
+            WHERE id = MyTable.id;
+BEGIN
+    myid := 1778;
+    MYINSERT(myid);
+    OPEN outcurs(myid);
+    FETCH outcurs INTO result;
+    DBMS_OUTPUT.PUT_LINE(result);
+end;
+
+SELECT * FROM MyTable;
+---
+
+CREATE OR REPLACE PROCEDURE MYUPDATE(id IN NUMBER, value IN NUMBER)
+IS
+    i NUMBER;
+BEGIN
+    DBMS_OUTPUT.ENABLE;
+    UPDATE MyTable
+        SET MyTable.val = MYUPDATE.value
+    WHERE MyTable.id = MYUPDATE.id;
+    i := sql%rowcount;
+    IF i = 0 THEN
+        DBMS_OUTPUT.PUT_LINE('No posts with this id');
+    end if;
+end;
+
+BEGIN
+    MYUPDATE(1, 4);
+end;
+---
+
+CREATE OR REPLACE PROCEDURE MYDELETE(id IN NUMBER)
+IS
+    i NUMBER;
+BEGIN
+    DBMS_OUTPUT.ENABLE;
+    DELETE FROM MyTable
+        WHERE MYDELETE.id = MyTable.id;
+    i := sql%rowcount;
+    IF i = 0 THEN
+        DBMS_OUTPUT.PUT_LINE('No posts with this id');
+    end if;
+end;
+
+BEGIN
+    MYINSERT(11);
+    MYINSERT(12);
+end;
+
+BEGIN
+    MYDELETE(11);
+end;
+
+-- task6
+CREATE OR REPLACE FUNCTION calc_total_remuneration(monthly_salary IN NUMBER, bonus_percentage IN SIMPLE_INTEGER)
+RETURN NUMBER
+IS
+percent NUMBER;
+months_in_year CONSTANT SIMPLE_INTEGER := 12;
+result NUMBER := 0;
+negative_monthly_salary EXCEPTION;
+null_monthly_salary EXCEPTION;
+negative_bonus_percentage EXCEPTION;
+BEGIN
+    IF(monthly_salary < 0) THEN
+        RAISE negative_monthly_salary;
+    END IF;
+
+    IF(monthly_salary IS NULL) THEN
+        RAISE null_monthly_salary;
+    END IF;
+
+    IF(bonus_percentage < 0) THEN
+        RAISE negative_bonus_percentage;
+    END IF;
+
+    percent := bonus_percentage / 100;
+    result := (1 + percent) * months_in_year * monthly_salary;
+RETURN(result);
+
+EXCEPTION
+WHEN negative_monthly_salary THEN
+BEGIN
+    DBMS_OUTPUT.enable;
+    DBMS_OUTPUT.put_line('Error: negative monthly salary');
+    RETURN(0);
+END;
+
+WHEN null_monthly_salary THEN
+BEGIN
+    DBMS_OUTPUT.enable;
+    DBMS_OUTPUT.put_line('Error: null monthly salary');
+    RETURN(0);
+END;
+
+WHEN negative_bonus_percentage THEN
+BEGIN
+    DBMS_OUTPUT.enable;
+    DBMS_OUTPUT.put_line('Error: negative bonus percentage');
+    RETURN(0);
+END;
+END calc_total_remuneration;
+
+---
+SELECT calc_total_remuneration(860, 6) FROM dual;
+---
