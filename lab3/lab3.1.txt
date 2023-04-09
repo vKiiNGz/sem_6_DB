@@ -1,0 +1,253 @@
+-- task 0 Creation users
+
+--First delete users
+ALTER SESSION SET "_oracle_script"=TRUE;
+DROP USER LAB3_DEV CASCADE;
+
+ALTER SESSION SET "_oracle_script"=TRUE;
+DROP USER LAB3_PROD CASCADE;
+
+--Then create users
+ALTER SESSION SET "_oracle_script"=TRUE;
+CREATE USER LAB3_DEV;
+ALTER USER LAB3_DEV QUOTA UNLIMITED ON USERS;
+
+ALTER SESSION SET "_oracle_script"=TRUE;
+CREATE USER LAB3_PROD;
+ALTER USER LAB3_PROD QUOTA UNLIMITED ON USERS;
+
+--Give privileges
+GRANT CONNECT, RESOURCE TO LAB3_DEV;
+GRANT CONNECT, RESOURCE TO LAB3_PROD;
+
+--task 1
+
+DROP TABLE DIST_TABLES;
+create table DIST_TABLES ("t_name"  varchar2(128) not null);
+SELECT * FROM DIST_TABLES;
+
+DROP TABLE OUT_TABLES;
+create table OUT_TABLES ("t_name"  varchar2(128) not null);
+SELECT * FROM OUT_TABLES;
+
+DROP TABLE HELP_TABLES;
+create table HELP_TABLES ("t_name"  varchar2(128) not null, created_at DATE);
+
+
+create or replace procedure COMPARE_SCHEMES(dev_schema in varchar2, prod_schema in varchar2) as
+    tab_count NUMBER;
+    clmn_count NUMBER;
+    dist_tab_count NUMBER;
+    ref_table_count NUMBER;
+
+    input_flag BOOLEAN := TRUE;
+    loop_flag BOOLEAN := FALSE;
+
+    ddl_out varchar2(225);
+
+BEGIN
+-- Модуль обхода dev таблиц и поиска отличий
+    for tab in (select * from ALL_TABLES WHERE OWNER=dev_schema) loop -- проходимся по всем таблицам из DEV
+        SELECT COUNT(*) INTO tab_count FROM ALL_TABLES         -- проверяем, есть ли таблица, с точно таким же
+        WHERE OWNER=prod_schema AND TABLE_NAME=tab.TABLE_NAME; -- именем, но у которой владелей prod_schema
+        IF tab_count=1 THEN
+            -- если таблица есть, то
+            for clmn in (SELECT * FROM ALL_TAB_COLUMNS -- проходимся по всем столбцам этой таблицы из DEV
+            WHERE table_name=tab.TABLE_NAME AND OWNER=dev_schema) loop
+                -- проверяем, есть ли столбец в prod_schema с таким же именем, типом и размером
+                SELECT COUNT(*) INTO clmn_count FROM ALL_TAB_COLUMNS WHERE  OWNER=prod_schema AND
+                                                                            DATA_TYPE=clmn.DATA_TYPE AND
+                                                                            DATA_LENGTH=clmn.DATA_LENGTH AND
+                                                                            COLUMN_NAME=clmn.COLUMN_NAME;
+                -- если столбец не найден, значит он отсутствует в prod_schema, добавляем таблицу в DIST_TABLES
+                IF clmn_count=0 THEN
+                    INSERT INTO DIST_TABLES VALUES (tab.TABLE_NAME);
+                END IF;
+                -- выходим из цикла, если найдено отличие, т.к. дальнейшее рассмотрение таблицы не имеет смысла
+                -- она и так имеет отличия
+                EXIT WHEN clmn_count=0;
+            END LOOP;
+        ELSE
+            -- если таблица отсутствует в prod_schema, добавляем таблицу в DIST_TABLES
+            INSERT INTO DIST_TABLES VALUES (tab.TABLE_NAME);
+        END IF;
+    END LOOP;
+
+
+
+-- теперь пройдемся по foreign key
+    -- Получение количества таблиц из DIST_TABLES
+    SELECT COUNT(*) INTO dist_tab_count FROM DIST_TABLES;
+
+    -- Цикл while, который выполняется, пока количество таблиц не равно 0
+    WHILE dist_tab_count <> 0 LOOP
+        for tab in (SELECT * FROM DIST_TABLES) LOOP
+
+            -- Цикл по внешним ключам таблицы
+            -- src от какой таблицы идет связь
+            -- dest к какой
+            for f_key in (select src_cc.table_name as src_table
+                                from all_constraints c -- all_constraints таблица в которой хранятся ключи
+                                inner join all_cons_columns dest_cc -- all_cons_columns таблица в которой хранятся имена столбцов с ключами
+                                    on c.r_constraint_name=dest_cc.constraint_name and c.r_owner=dest_cc.owner
+                                    inner join all_cons_columns src_cc
+                                        on c.constraint_name=src_cc.constraint_name and c.owner=src_cc.owner
+                          where c.constraint_type='R' and dest_cc.owner=dev_schema AND dest_cc.table_name=tab."t_name") loop
+
+                -- Получение количества таблиц из OUT_TABLES, которые являются родительскими для текущей таблицы
+                SELECT COUNT(*) into ref_table_count FROM OUT_TABLES WHERE "t_name"=f_key.SRC_TABLE;
+
+                -- Цикл по внешним ключам, которые связаны с текущей таблицей
+                for lp in (select dest_cc.table_name as dest_table
+                           from all_constraints c
+                           inner join all_cons_columns dest_cc
+                               on c.r_constraint_name=dest_cc.constraint_name and c.r_owner=dest_cc.owner
+                               inner join all_cons_columns src_cc on
+                                c.constraint_name=src_cc.constraint_name and c.owner=src_cc.owner
+                           where c.constraint_type='R' and dest_cc.owner=dev_schema AND src_cc.table_name=tab."t_name") loop
+
+                    -- Если в цикле по внешним ключам найдена родительская таблица, которая связана с текущей таблицей
+                    if lp.dest_table=f_key.SRC_TABLE then
+                        ddl_out := 'Looping ref ' || f_key.SRC_TABLE || ' ' || tab."t_name";
+                        dbms_output.put_line(ddl_out);
+                        loop_flag := TRUE;
+                    end if;
+                end loop;
+
+                -- Если таблица не имеет родительских таблиц, то ее можно обработать
+                IF ref_table_count=0 AND not loop_flag then
+                    input_flag:=FALSE;
+                END IF;
+            end loop;
+
+            -- Если таблица можно обработать, то она переносится в таблицу OUT_TABLES, и удаляется из DIST_TABLES
+            IF input_flag THEN
+                DELETE FROM DIST_TABLES WHERE "t_name"=tab."t_name";
+                INSERT INTO OUT_TABLES VALUES (tab."t_name");
+            END IF;
+
+            input_flag:=TRUE;
+            loop_flag := FALSE;
+
+            -- Получение количества таблиц из DIST_TABLES
+            SELECT COUNT(*) INTO dist_tab_count FROM DIST_TABLES;
+        END LOOP;
+    END LOOP;
+
+    -- самый трушный костыль для того, чтобы перевернуть вывод и сделать его правильным
+    for tab in (SELECT * FROM OUT_TABLES) LOOP
+        INSERT INTO HELP_TABLES VALUES (tab."t_name", SYSDATE);
+        DBMS_LOCK.SLEEP(1);
+    END LOOP;
+    DELETE OUT_TABLES;
+    for tab in (SELECT * FROM HELP_TABLES ORDER BY created_at DESC) LOOP
+        INSERT INTO OUT_TABLES VALUES (tab."t_name");
+    END LOOP;
+
+    dbms_output.put_line('--------TABLES--------');
+    for tab in (SELECT * FROM OUT_TABLES) LOOP
+        dbms_output.put_line(tab."t_name");
+        ddl_out := 'CREATE TABLE ' || prod_schema || '.' || '"' || tab."t_name" || '"' || ' (';
+        dbms_output.put_line(ddl_out);
+        for colmn in (SELECT * FROM ALL_TAB_COLUMNS WHERE table_name=tab."t_name" AND OWNER=dev_schema) loop
+            ddl_out := '"' || colmn.COLUMN_NAME || '" ' || colmn.DATA_TYPE || '(' || colmn.DATA_LENGTH || ')';
+            if colmn.DATA_DEFAULT is not NULL THEN
+                ddl_out := ddl_out || ' default ' || colmn.DATA_DEFAULT;
+            end if;
+            if colmn.NULLABLE='N' THEN
+                ddl_out := ddl_out || ' not null ';
+            end if;
+            dbms_output.put_line(ddl_out);
+        end loop;
+        for cnstrnt in (SELECT * FROM ALL_CONSTRAINTS WHERE OWNER=dev_schema AND table_name=tab."t_name" AND CONSTRAINT_TYPE='P' AND GENERATED='USER NAME') loop
+            for c_name in (SELECT cols.column_name FROM all_constraints cons, all_cons_columns cols WHERE cols.table_name = tab."t_name" AND cons.constraint_type = 'P'
+                            AND cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner ORDER BY cols.table_name, cols.position) LOOP
+                ddl_out := 'CONSTRAINT ' || cnstrnt.CONSTRAINT_NAME || ' PRIMARY KEY (' || c_name.COLUMN_NAME || ')';
+            end loop;
+            dbms_output.put_line(ddl_out);
+        end loop;
+        for cnstrnt in (select src_cc.owner as src_owner, src_cc.table_name as src_table, src_cc.column_name as src_column,
+                            dest_cc.owner as dest_owner, dest_cc.table_name as dest_table, dest_cc.column_name as dest_column, c.constraint_name
+                                from all_constraints c inner join all_cons_columns dest_cc on c.r_constraint_name = dest_cc.constraint_name
+                                    and c.r_owner = dest_cc.owner inner join all_cons_columns src_cc on c.constraint_name = src_cc.constraint_name
+                                        and c.owner = src_cc.owner where c.constraint_type = 'R' and dest_cc.owner = dev_schema
+                                            and dest_cc.table_name = tab."t_name") loop
+            for ref_name in (SELECT * FROM all_cons_columns a JOIN all_constraints c ON a.owner = c.owner AND a.constraint_name = c.constraint_name
+                                JOIN all_constraints c_pk ON c.r_owner = c_pk.owner AND c.r_constraint_name = c_pk.constraint_name
+                                    WHERE c.constraint_type = 'R' AND a.table_name = tab."t_name") loop
+            ddl_out := 'CONSTRAINT ' || ref_name.CONSTRAINT_NAME || ' FOREIGN KEY (' || ref_name.COLUMN_NAME || ') REFERENCES  ' || dev_schema || '."' || ref_name.table_name || '"' || '(' || ref_name.COLUMN_NAME || ');';
+            end loop;
+            dbms_output.put_line(ddl_out);
+        end loop;
+        dbms_output.put_line(')');
+    END LOOP;
+END COMPARE_SCHEMES;
+
+
+
+CALL COMPARE_SCHEMES('LAB3_DEV', 'LAB3_PROD');
+
+--test data
+create table LAB3_DEV."groups"
+(
+    "id" number primary key,
+    "name"  varchar2(30) not null,
+    c_val number not null
+);
+
+create table LAB3_PROD."groups"
+(
+    "id" number primary key,
+    "name"  varchar2(30) not null,
+    c_val number not null
+);
+
+create table LAB3_DEV."students"
+(
+    "id" number primary key,
+    "name"  varchar2(30) not null,
+    group_id number not null
+);
+
+create table LAB3_DEV."val1"
+(
+    "id" number primary key,
+    "name"  varchar2(33) not null,
+    c_val number not null
+);
+
+create table LAB3_PROD."val1"
+(
+    "id" number primary key,
+    "name"  varchar2(30) not null,
+    c_val number not null
+);
+drop table LAB3_DEV."students";
+
+DROP TABLE LAB3_DEV."products";
+CREATE TABLE LAB3_DEV."products" (
+    product_id numeric(10) not null,
+    supplier_id numeric(10) not null,
+    constraint dd_pk PRIMARY KEY (product_id),
+    CONSTRAINT fk_supplier FOREIGN KEY (supplier_id)
+    REFERENCES  LAB3_DEV."supplier"(supplier_id)
+);
+
+DROP TABLE LAB3_DEV."supplier";
+CREATE TABLE LAB3_DEV."supplier"
+(
+    product_id numeric(10) not null,
+    supplier_id numeric(10) not null,
+    supplier_name varchar2(50) not null,
+    contact_name varchar2(50),
+    CONSTRAINT supplier_pk PRIMARY KEY (supplier_id)
+);
+
+DROP TABLE LAB3_DEV."sales";
+CREATE TABLE LAB3_DEV."sales" (
+    sale_id numeric(10) not null,
+    supplier_id numeric(10) not null,
+    constraint sl_pk PRIMARY KEY (sale_id),
+    CONSTRAINT fk2_supplier FOREIGN KEY (supplier_id)
+    REFERENCES  LAB3_DEV."supplier"(supplier_id)
+);
