@@ -34,6 +34,47 @@ DROP TABLE HELP_TABLES;
 create table HELP_TABLES ("t_name"  varchar2(128) not null, created_at DATE);
 
 
+create or replace function GET_DIST_TABLES(dev_schema in varchar2, prod_schema in varchar2) return varchar2 as
+    tab_count NUMBER;
+    clmn_count NUMBER;
+
+    DIST_TABLES varchar2(128);
+BEGIN
+    DIST_TABLES := ''; -- инициализируем список таблиц
+-- Модуль обхода dev таблиц и поиска отличий
+    for tab in (select * from ALL_TABLES WHERE OWNER=dev_schema) loop -- проходимся по всем таблицам из DEV
+    SELECT COUNT(*) INTO tab_count FROM ALL_TABLES         -- проверяем, есть ли таблица, с точно таким же
+    WHERE OWNER=prod_schema AND TABLE_NAME=tab.TABLE_NAME; -- именем, но у которой владелей prod_schema
+    IF tab_count=1 THEN
+        -- если таблица есть, то
+        for clmn in (SELECT * FROM ALL_TAB_COLUMNS -- проходимся по всем столбцам этой таблицы из DEV
+        WHERE table_name=tab.TABLE_NAME AND OWNER=dev_schema) loop
+            -- проверяем, есть ли столбец в prod_schema с таким же именем, типом и размером
+            SELECT COUNT(*) INTO clmn_count FROM ALL_TAB_COLUMNS WHERE  OWNER=prod_schema AND
+                                                                        DATA_TYPE=clmn.DATA_TYPE AND
+                                                                        DATA_LENGTH=clmn.DATA_LENGTH AND
+                                                                        COLUMN_NAME=clmn.COLUMN_NAME;
+            -- если столбец не найден, значит он отсутствует в prod_schema, добавляем таблицу в DIST_TABLES
+            IF clmn_count=0 THEN
+                DIST_TABLES := DIST_TABLES || ',' || tab.TABLE_NAME; -- добавляем таблицу в список
+                EXIT; -- выходим из цикла, т.к. дальнейшее рассмотрение таблицы не имеет смысла
+            END IF;
+        END LOOP;
+    ELSE
+        -- если таблица отсутствует в prod_schema, добавляем таблицу в DIST_TABLES
+        DIST_TABLES := DIST_TABLES || ',' || tab.TABLE_NAME; -- добавляем таблицу в список
+    END IF;
+END LOOP;
+
+-- убираем первую запятую из списка таблиц, если он не пустой
+IF LENGTH(DIST_TABLES) > 0 THEN
+    DIST_TABLES := SUBSTR(DIST_TABLES, 2);
+END IF;
+return DIST_TABLES;
+END;
+
+SELECT GET_DIST_TABLES('LAB3_DEV', 'LAB3_PROD') as TableName FROM dual;
+
 create or replace procedure COMPARE_SCHEMES(dev_schema in varchar2, prod_schema in varchar2) as
     tab_count NUMBER;
     clmn_count NUMBER;
@@ -44,35 +85,15 @@ create or replace procedure COMPARE_SCHEMES(dev_schema in varchar2, prod_schema 
     loop_flag BOOLEAN := FALSE;
 
     ddl_out varchar2(225);
-
+    l_tablist VARCHAR2(4000) := GET_DIST_TABLES('LAB3_DEV', 'LAB3_PROD');
 BEGIN
 -- Модуль обхода dev таблиц и поиска отличий
-    for tab in (select * from ALL_TABLES WHERE OWNER=dev_schema) loop -- проходимся по всем таблицам из DEV
-        SELECT COUNT(*) INTO tab_count FROM ALL_TABLES         -- проверяем, есть ли таблица, с точно таким же
-        WHERE OWNER=prod_schema AND TABLE_NAME=tab.TABLE_NAME; -- именем, но у которой владелей prod_schema
-        IF tab_count=1 THEN
-            -- если таблица есть, то
-            for clmn in (SELECT * FROM ALL_TAB_COLUMNS -- проходимся по всем столбцам этой таблицы из DEV
-            WHERE table_name=tab.TABLE_NAME AND OWNER=dev_schema) loop
-                -- проверяем, есть ли столбец в prod_schema с таким же именем, типом и размером
-                SELECT COUNT(*) INTO clmn_count FROM ALL_TAB_COLUMNS WHERE  OWNER=prod_schema AND
-                                                                            DATA_TYPE=clmn.DATA_TYPE AND
-                                                                            DATA_LENGTH=clmn.DATA_LENGTH AND
-                                                                            COLUMN_NAME=clmn.COLUMN_NAME;
-                -- если столбец не найден, значит он отсутствует в prod_schema, добавляем таблицу в DIST_TABLES
-                IF clmn_count=0 THEN
-                    INSERT INTO DIST_TABLES VALUES (tab.TABLE_NAME);
-                END IF;
-                -- выходим из цикла, если найдено отличие, т.к. дальнейшее рассмотрение таблицы не имеет смысла
-                -- она и так имеет отличия
-                EXIT WHEN clmn_count=0;
-            END LOOP;
-        ELSE
-            -- если таблица отсутствует в prod_schema, добавляем таблицу в DIST_TABLES
-            INSERT INTO DIST_TABLES VALUES (tab.TABLE_NAME);
-        END IF;
-    END LOOP;
-
+    FOR rec IN (SELECT regexp_substr(l_tablist, '[^,]+', 1, LEVEL) AS t_name
+              FROM dual
+              CONNECT BY LEVEL <= regexp_count(l_tablist, ',') + 1)
+  LOOP
+    INSERT INTO DIST_TABLES VALUES (rec.t_name);
+  END LOOP;
 
 
 -- теперь пройдемся по foreign key
@@ -159,9 +180,13 @@ BEGIN
             end if;
             dbms_output.put_line(ddl_out);
         end loop;
-        for cnstrnt in (SELECT * FROM ALL_CONSTRAINTS WHERE OWNER=dev_schema AND table_name=tab."t_name" AND CONSTRAINT_TYPE='P' AND GENERATED='USER NAME') loop
-            for c_name in (SELECT cols.column_name FROM all_constraints cons, all_cons_columns cols WHERE cols.table_name = tab."t_name" AND cons.constraint_type = 'P'
-                            AND cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner ORDER BY cols.table_name, cols.position) LOOP
+        for cnstrnt in (SELECT * FROM ALL_CONSTRAINTS
+                                 WHERE OWNER=dev_schema AND table_name=tab."t_name" AND
+                                       CONSTRAINT_TYPE='P' AND GENERATED='USER NAME') loop
+            for c_name in (SELECT cols.column_name FROM all_constraints cons, all_cons_columns cols
+                                                   WHERE cols.table_name = tab."t_name" AND cons.constraint_type = 'P'
+                            AND cons.constraint_name = cols.constraint_name AND cons.owner = cols.owner
+                                                   ORDER BY cols.table_name, cols.position) LOOP
                 ddl_out := 'CONSTRAINT ' || cnstrnt.CONSTRAINT_NAME || ' PRIMARY KEY (' || c_name.COLUMN_NAME || ')';
             end loop;
             dbms_output.put_line(ddl_out);
@@ -175,12 +200,15 @@ BEGIN
             for ref_name in (SELECT * FROM all_cons_columns a JOIN all_constraints c ON a.owner = c.owner AND a.constraint_name = c.constraint_name
                                 JOIN all_constraints c_pk ON c.r_owner = c_pk.owner AND c.r_constraint_name = c_pk.constraint_name
                                     WHERE c.constraint_type = 'R' AND a.table_name = tab."t_name") loop
-            ddl_out := 'CONSTRAINT ' || ref_name.CONSTRAINT_NAME || ' FOREIGN KEY (' || ref_name.COLUMN_NAME || ') REFERENCES  ' || dev_schema || '."' || ref_name.table_name || '"' || '(' || ref_name.COLUMN_NAME || ');';
+            ddl_out := 'CONSTRAINT ' || cnstrnt.CONSTRAINT_NAME || ' FOREIGN KEY (' || ref_name.COLUMN_NAME || ') REFERENCES  ' || dev_schema || '."' || ref_name.table_name || '"' || '(' || ref_name.COLUMN_NAME || ');';
             end loop;
             dbms_output.put_line(ddl_out);
         end loop;
         dbms_output.put_line(')');
     END LOOP;
+    DELETE DIST_TABLES;
+    DELETE OUT_TABLES;
+    DELETE HELP_TABLES;
 END COMPARE_SCHEMES;
 
 
